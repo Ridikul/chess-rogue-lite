@@ -1,0 +1,18 @@
+{
+  "name": "Chess Rogue",
+  "short_name": "ChessRogue",
+  "description": "Un roguelite d'échecs — combats, cartes et donjons",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#1a1a2e",
+  "theme_color": "#1a1a2e",
+  "icons": [
+    {
+      "src": "assets/pieces/king.png",
+      "sizes": "1024x1024",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
