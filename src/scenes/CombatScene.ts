@@ -41,12 +41,15 @@ export class CombatScene extends Phaser.Scene {
 
   private selectedSquare: Square | null = null
   private legalTargets: Square[] = []
+  private lastMove: { from: Square; to: Square } | null = null
   private isPlayerTurn = true
   private aiThinking = false
 
   private boardContainer!: Phaser.GameObjects.Container
   private boardGraphics!: Phaser.GameObjects.Graphics
+  private legalTargetGfx!: Phaser.GameObjects.Graphics
   private pieceTexts: Map<Square, Phaser.GameObjects.Text> = new Map()
+  private pieceHalos: Map<Square, Phaser.GameObjects.Arc> = new Map()
   private upgradeMarkers: Map<Square, Phaser.GameObjects.Text> = new Map()
   private cardObjects: Phaser.GameObjects.Container[] = []
   private cardBounds: Array<{ card: CardInstance; x: number; y: number; bg: Phaser.GameObjects.Rectangle }> = []
@@ -55,10 +58,16 @@ export class CombatScene extends Phaser.Scene {
   private cardPreviewContainer?: Phaser.GameObjects.Container
   private cardPreviewOverlay?: Phaser.GameObjects.Rectangle
 
-  // Drag & drop state
+  // Drag & drop state (placement)
   private dragGhost?: Phaser.GameObjects.Text
   private dragHighlight?: Phaser.GameObjects.Rectangle
   private pendingDrag: { card: CardInstance; startGx: number; startGy: number } | null = null
+
+  // Drag & drop state (chess)
+  private chessDragGhost?: Phaser.GameObjects.Text
+  private chessDragHighlight?: Phaser.GameObjects.Rectangle
+  private chessDragFrom: Square | null = null
+  private pendingChessDrag: { from: Square; startGx: number; startGy: number } | null = null
 
   // Deal phase state
   private dealIndex = 0
@@ -90,9 +99,11 @@ export class CombatScene extends Phaser.Scene {
     this.selectedCard = null
     this.selectedSquare = null
     this.legalTargets = []
+    this.lastMove = null
     this.isPlayerTurn = true
     this.aiThinking = false
     this.pieceTexts = new Map()
+    this.pieceHalos = new Map()
     this.upgradeMarkers = new Map()
     this.relicHudObjects = []
     this.cardObjects = []
@@ -111,6 +122,12 @@ export class CombatScene extends Phaser.Scene {
     this.dragHighlight?.destroy()
     this.dragHighlight = undefined
     this.pendingDrag = null
+    this.chessDragGhost?.destroy()
+    this.chessDragGhost = undefined
+    this.chessDragHighlight?.destroy()
+    this.chessDragHighlight = undefined
+    this.chessDragFrom = null
+    this.pendingChessDrag = null
   }
 
   create() {
@@ -142,6 +159,17 @@ export class CombatScene extends Phaser.Scene {
     this.boardGraphics = this.add.graphics()
     this.boardContainer = this.add.container(BOARD_X, BOARD_Y)
     this.boardContainer.add(this.boardGraphics)
+
+    this.legalTargetGfx = this.add.graphics()
+    this.boardContainer.add(this.legalTargetGfx)
+    this.tweens.add({
+      targets: this.legalTargetGfx,
+      alpha: 0.5,
+      duration: 720,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut',
+    })
 
     this.createBoardLabels()
     this.buildConfirmButton()
@@ -443,6 +471,7 @@ export class CombatScene extends Phaser.Scene {
         square: rank8[r8i++] ?? rank7[r7i++],
         cardInstanceId: c.instanceId,
         ability: c.definition.ability,
+        rarity: c.definition.rarity,
       })),
       ...pawns.map(c => ({
         type: c.definition.pieceType,
@@ -450,6 +479,7 @@ export class CombatScene extends Phaser.Scene {
         square: rank7[r7i++],
         cardInstanceId: c.instanceId,
         ability: c.definition.ability,
+        rarity: c.definition.rarity,
       })),
     ]
 
@@ -493,6 +523,7 @@ export class CombatScene extends Phaser.Scene {
       ability: this.selectedCard.definition.ability,
       upgraded: this.selectedCard.upgraded,
       upgradeBonus: this.selectedCard.upgraded ? this.selectedCard.definition.upgradeBonus : undefined,
+      rarity: this.selectedCard.definition.rarity,
     }
     this.placedCardMap.set(this.selectedCard.instanceId, this.selectedCard)
     this.playerPlaced.push(piece)
@@ -591,6 +622,7 @@ export class CombatScene extends Phaser.Scene {
   private doPlayerMove(from: Square, to: Square) {
     const result = this.engine.applyMove(from, to, this.runState)
     if (!result) return
+    this.lastMove = { from, to }
 
     if (result.promoted) {
       this.showFloatingText('♛ Promotion !', 0xffd700)
@@ -608,51 +640,197 @@ export class CombatScene extends Phaser.Scene {
       this.updateHpText()
     }
 
-    const { over, winner } = this.engine.isGameOver()
-    if (over) {
-      if (winner === 'black' && hasRelic(this.runState, 'death_mask') && this.engine.tryUndying()) {
-        this.showFloatingText('Masque de la Mort !', 0xff8800)
-        this.isPlayerTurn = true
+    this.animateMove(from, to, result.thornsKill, () => {
+      const { over, winner } = this.engine.isGameOver()
+      if (over) {
+        if (winner === 'black' && hasRelic(this.runState, 'death_mask') && this.engine.tryUndying()) {
+          this.showFloatingText('Masque de la Mort !', 0xff8800)
+          this.isPlayerTurn = true
+          this.renderBoard()
+          this.renderPieces()
+          return
+        }
+        this.endCombat(winner === 'white')
+        return
+      }
+
+      if (result.bonusTurn) {
+        this.statusText.setText('Coup bonus ! (Cavalier Fantôme)')
         this.renderBoard()
         this.renderPieces()
         return
       }
-      this.endCombat(winner === 'white')
-      return
-    }
 
-    if (result.bonusTurn) {
-      this.statusText.setText('Coup bonus ! (Cavalier Fantôme)')
+      this.isPlayerTurn = false
+      this.renderBoard()
+      this.renderPieces()
+      this.statusText.setText("L'ennemi réfléchit…")
+      this.aiThinking = true
+      this.time.delayedCall(700, () => this.doEnemyMove())
+    })
+  }
+
+  private doEnemyMove() {
+    const best = this.engine.getBestMoveForEnemy()
+    if (!best) {
+      this.aiThinking = false
+      const { over, winner } = this.engine.isGameOver()
+      if (over) { this.endCombat(winner === 'white'); return }
+      this.isPlayerTurn = true
       this.renderBoard()
       this.renderPieces()
       return
     }
 
-    this.isPlayerTurn = false
-    this.renderBoard()
-    this.renderPieces()
-    this.statusText.setText("L'ennemi réfléchit…")
-    this.aiThinking = true
-    this.time.delayedCall(700, () => this.doEnemyMove())
+    const result = this.engine.applyMove(best.from, best.to, this.runState)
+    this.aiThinking = false
+    this.lastMove = { from: best.from, to: best.to }
+
+    this.animateMove(best.from, best.to, !!result?.thornsKill, () => {
+      const { over, winner } = this.engine.isGameOver()
+      if (over) { this.endCombat(winner === 'white'); return }
+      if (result?.bonusTurn) {
+        this.statusText.setText('Cavalier Fantôme adverse : coup bonus !')
+        this.aiThinking = true
+        this.renderBoard()
+        this.renderPieces()
+        this.time.delayedCall(500, () => this.doEnemyMove())
+        return
+      }
+      this.isPlayerTurn = true
+      this.statusText.setText('À toi de jouer.')
+      this.renderBoard()
+      this.renderPieces()
+    })
   }
 
-  private doEnemyMove() {
-    const best = this.engine.getBestMoveForEnemy()
-    if (best) this.engine.applyMove(best.from, best.to, this.runState)
-    this.aiThinking = false
+  private animateMove(from: Square, to: Square, thornsKill: boolean, onComplete: () => void): void {
+    const movingText = this.pieceTexts.get(from)
+    const movingHalo = this.pieceHalos.get(from)
+    const movingMarker = this.upgradeMarkers.get(from)
+    const capturedText = this.pieceTexts.get(to)
+    const capturedHalo = this.pieceHalos.get(to)
+    const capturedMarker = this.upgradeMarkers.get(to)
 
-    const { over, winner } = this.engine.isGameOver()
-    if (over) { this.endCombat(winner === 'white'); return }
+    this.pieceTexts.delete(from)
+    this.pieceHalos.delete(from)
+    this.upgradeMarkers.delete(from)
+    this.pieceTexts.delete(to)
+    this.pieceHalos.delete(to)
+    this.upgradeMarkers.delete(to)
 
-    this.isPlayerTurn = true
-    this.statusText.setText('À toi de jouer.')
+    const { col, row } = squareToColRow(to)
+    const tx = col * CELL + CELL / 2
+    const ty = row * CELL + CELL / 2
+    const duration = 220
+    const ease = 'Quad.Out'
+
     this.renderBoard()
-    this.renderPieces()
+
+    if (movingText) this.tweens.add({ targets: movingText, x: tx, y: ty, duration, ease })
+    if (movingHalo) this.tweens.add({ targets: movingHalo, x: tx, y: ty, duration, ease })
+    if (movingMarker) {
+      this.tweens.add({
+        targets: movingMarker,
+        x: col * CELL + CELL - 6,
+        y: row * CELL + 4,
+        duration, ease,
+      })
+    }
+
+    const fadeDuration = Math.round(duration * 0.8)
+    if (capturedText) this.tweens.add({ targets: capturedText, alpha: 0, scale: 0.55, duration: fadeDuration, ease })
+    if (capturedHalo) this.tweens.add({ targets: capturedHalo, alpha: 0, scale: 0.55, duration: fadeDuration, ease })
+    if (capturedMarker) this.tweens.add({ targets: capturedMarker, alpha: 0, duration: fadeDuration, ease })
+
+    if (thornsKill) {
+      if (movingText) this.tweens.add({ targets: movingText, alpha: 0, scale: 0.55, duration: fadeDuration, delay: fadeDuration, ease })
+      if (movingHalo) this.tweens.add({ targets: movingHalo, alpha: 0, scale: 0.55, duration: fadeDuration, delay: fadeDuration, ease })
+      if (movingMarker) this.tweens.add({ targets: movingMarker, alpha: 0, duration: fadeDuration, delay: fadeDuration, ease })
+    }
+
+    const totalDuration = thornsKill ? duration + fadeDuration : duration
+    this.time.delayedCall(totalDuration + 30, () => {
+      movingText?.destroy()
+      movingHalo?.destroy()
+      movingMarker?.destroy()
+      capturedText?.destroy()
+      capturedHalo?.destroy()
+      capturedMarker?.destroy()
+      onComplete()
+    })
   }
 
   private handleBoardClick(col: number, row: number) {
     if (this.phase === 'placement') this.handlePlacementClick(col, row)
     else if (this.phase === 'chess') this.handleChessClick(col, row)
+  }
+
+  private spawnChessDragGhost(from: Square, gx: number, gy: number) {
+    const piece = this.engine.getBoardPieces().get(from)
+    if (!piece) return
+    const emoji = piece.color === 'white' ? PIECE_EMOJI_WHITE[piece.type] : PIECE_EMOJI[piece.type]
+    const hasRarityColor = !!piece.rarity && piece.rarity !== 'common'
+    const fillColor = hasRarityColor
+      ? `#${RARITY_COLOR[piece.rarity!].toString(16).padStart(6, '0')}`
+      : (piece.color === 'white' ? '#f5f0e0' : '#1a0a04')
+    this.chessDragGhost?.destroy()
+    this.chessDragGhost = this.add.text(gx, gy, emoji, {
+      fontFamily: FONT, fontSize: '60px',
+      color: fillColor,
+      stroke: piece.color === 'white' ? '#4a2a10' : '#c0a080',
+      strokeThickness: 3,
+    }).setOrigin(0.5).setAlpha(0.92).setDepth(100)
+
+    this.chessDragFrom = from
+    this.pieceTexts.get(from)?.setAlpha(0.22)
+    this.pieceHalos.get(from)?.setAlpha(0.18)
+    this.upgradeMarkers.get(from)?.setAlpha(0.22)
+  }
+
+  private updateChessDropHighlight(gx: number, gy: number) {
+    this.chessDragHighlight?.destroy()
+    this.chessDragHighlight = undefined
+    const coords = this.screenToBoard(gx, gy)
+    if (!coords) return
+    const sq = colRowToSquare(coords.col, coords.row)
+    if (!this.legalTargets.includes(sq)) return
+    const wx = this.boardContainer.x + coords.col * CELL * this.boardContainer.scaleX
+    const wy = this.boardContainer.y + coords.row * CELL * this.boardContainer.scaleY
+    this.chessDragHighlight = this.add.rectangle(
+      wx, wy,
+      CELL * this.boardContainer.scaleX, CELL * this.boardContainer.scaleY,
+      0x44ff88, 0.38,
+    ).setOrigin(0).setDepth(50)
+  }
+
+  private endChessDrag(gx: number, gy: number) {
+    this.chessDragGhost?.destroy()
+    this.chessDragGhost = undefined
+    this.chessDragHighlight?.destroy()
+    this.chessDragHighlight = undefined
+
+    const from = this.chessDragFrom
+    this.chessDragFrom = null
+    this.pendingChessDrag = null
+
+    if (from) {
+      this.pieceTexts.get(from)?.setAlpha(1)
+      this.pieceHalos.get(from)?.setAlpha(1)
+      this.upgradeMarkers.get(from)?.setAlpha(1)
+    }
+
+    if (!from) return
+    const coords = this.screenToBoard(gx, gy)
+    if (!coords) return
+    const target = colRowToSquare(coords.col, coords.row)
+    if (target === from || !this.legalTargets.includes(target)) return
+
+    this.doPlayerMove(from, target)
+    this.selectedSquare = null
+    this.legalTargets = []
+    this.clearCardPreview()
+    this.renderBoard()
   }
 
   // ─── RESULT & REWARD ─────────────────────────────────────────────────────────
@@ -705,8 +883,10 @@ export class CombatScene extends Phaser.Scene {
         let color = isLight ? 0xc8aa88 : 0x6e4c34
 
         if (this.phase === 'placement' && r >= 4) color = blendColor(color, 0x0044ff, 0.14)
+        if (this.phase === 'chess' && this.lastMove && (this.lastMove.from === sq || this.lastMove.to === sq)) {
+          color = blendColor(color, 0xff9b3a, 0.34)
+        }
         if (this.selectedSquare === sq) color = 0x9ec44a
-        if (this.legalTargets.includes(sq)) color = blendColor(color, 0xffff00, 0.45)
 
         g.fillStyle(color)
         g.fillRect(c * CELL, r * CELL, CELL, CELL)
@@ -731,12 +911,35 @@ export class CombatScene extends Phaser.Scene {
       }
     }
 
+    this.drawLegalTargetIndicators()
     this.updateHpText()
+  }
+
+  private drawLegalTargetIndicators() {
+    const g = this.legalTargetGfx
+    if (!g) return
+    g.clear()
+    if (this.phase !== 'chess' || this.legalTargets.length === 0) return
+    const pieces = this.engine.getBoardPieces()
+    for (const sq of this.legalTargets) {
+      const { col, row } = squareToColRow(sq)
+      const cx = col * CELL + CELL / 2
+      const cy = row * CELL + CELL / 2
+      if (pieces.get(sq)) {
+        g.lineStyle(4, 0xffe066, 1)
+        g.strokeCircle(cx, cy, CELL / 2 - 4)
+      } else {
+        g.fillStyle(0xffe066, 0.95)
+        g.fillCircle(cx, cy, CELL / 6)
+      }
+    }
   }
 
   private renderPieces() {
     this.pieceTexts.forEach(t => t.destroy())
     this.pieceTexts.clear()
+    this.pieceHalos.forEach(h => h.destroy())
+    this.pieceHalos.clear()
     this.upgradeMarkers.forEach(t => t.destroy())
     this.upgradeMarkers.clear()
 
@@ -751,9 +954,20 @@ export class CombatScene extends Phaser.Scene {
       const cy = row * CELL + CELL / 2
 
       const emoji = piece.color === 'white' ? PIECE_EMOJI_WHITE[piece.type] : PIECE_EMOJI[piece.type]
+      const hasRarityColor = !!piece.rarity && piece.rarity !== 'common'
+      if (hasRarityColor) {
+        const rarityNum = RARITY_COLOR[piece.rarity!]
+        const halo = this.add.circle(cx, cy, CELL / 2 - 6, rarityNum, 0.28)
+          .setStrokeStyle(2, rarityNum, 0.9)
+        this.boardContainer.add(halo)
+        this.pieceHalos.set(piece.square, halo)
+      }
+      const fillColor = hasRarityColor
+        ? `#${RARITY_COLOR[piece.rarity!].toString(16).padStart(6, '0')}`
+        : (piece.color === 'white' ? '#f5f0e0' : '#1a0a04')
       const t = this.add.text(cx, cy, emoji, {
         fontFamily: FONT, fontSize: '50px',
-        color: piece.color === 'white' ? '#f5f0e0' : '#1a0a04',
+        color: fillColor,
         stroke: piece.color === 'white' ? '#4a2a10' : '#c0a080',
         strokeThickness: 3,
       }).setOrigin(0.5)
@@ -903,14 +1117,9 @@ export class CombatScene extends Phaser.Scene {
     const cx = 55
     const cy = this.scale.height - 28
     this.abandonBtnBg = this.add.rectangle(cx, cy, 96, 34, 0x661111)
-      .setInteractive(new Phaser.Geom.Rectangle(-48, -17, 96, 34), Phaser.Geom.Rectangle.Contains)
     this.abandonBtnLabel = this.add.text(cx, cy, 'Abandonner', { fontFamily: FONT, fontSize: '12px', color: '#ffaaaa', fontStyle: 'bold' }).setOrigin(0.5)
     this.abandonBtnBg.setVisible(false)
     this.abandonBtnLabel.setVisible(false)
-
-    this.abandonBtnBg.on('pointerdown', () => this.endCombat(false))
-    this.abandonBtnBg.on('pointerover', () => this.abandonBtnBg.setFillStyle(0x992222))
-    this.abandonBtnBg.on('pointerout', () => this.abandonBtnBg.setFillStyle(0x661111))
   }
 
   // Transform a screen click into board col/row, accounting for container transform.
@@ -998,6 +1207,16 @@ export class CombatScene extends Phaser.Scene {
         return
       }
 
+      if (
+        this.phase === 'chess' &&
+        this.abandonBtnBg?.visible &&
+        Math.abs(gx - 55) <= 48 &&
+        Math.abs(gy - (this.scale.height - 28)) <= 17
+      ) {
+        this.endCombat(false)
+        return
+      }
+
       // Card touched → select it and arm the pending drag
       if (this.phase === 'placement') {
         const hit = cardAt(gx, gy)
@@ -1013,18 +1232,45 @@ export class CombatScene extends Phaser.Scene {
 
       // Board or chess click
       const coords = this.screenToBoard(gx, gy)
-      if (coords) this.handleBoardClick(coords.col, coords.row)
+      if (coords) {
+        if (this.phase === 'chess' && this.isPlayerTurn && !this.aiThinking) {
+          const sq = colRowToSquare(coords.col, coords.row)
+          const piece = this.engine.getBoardPieces().get(sq)
+          if (piece?.color === 'white') {
+            this.pendingChessDrag = { from: sq, startGx: gx, startGy: gy }
+          }
+        }
+        this.handleBoardClick(coords.col, coords.row)
+      }
     }
 
     const handleMove = (gx: number, gy: number) => {
-      // Active drag: move ghost + highlight drop target
+      // Active chess drag: move ghost + highlight legal target
+      if (this.chessDragGhost) {
+        this.chessDragGhost.setPosition(gx, gy)
+        this.updateChessDropHighlight(gx, gy)
+        return
+      }
+
+      // Pending chess drag: promote to active once threshold crossed
+      if (this.pendingChessDrag) {
+        const dx = gx - this.pendingChessDrag.startGx
+        const dy = gy - this.pendingChessDrag.startGy
+        if (Math.sqrt(dx * dx + dy * dy) >= DRAG_THRESHOLD) {
+          this.spawnChessDragGhost(this.pendingChessDrag.from, gx, gy)
+          this.updateChessDropHighlight(gx, gy)
+        }
+        return
+      }
+
+      // Active placement drag: move ghost + highlight drop target
       if (this.dragGhost) {
         this.dragGhost.setPosition(gx, gy)
         updateDropHighlight(gx, gy)
         return
       }
 
-      // Pending drag: promote to active once threshold crossed
+      // Pending placement drag: promote to active once threshold crossed
       if (this.pendingDrag) {
         const dx = gx - this.pendingDrag.startGx
         const dy = gy - this.pendingDrag.startGy
@@ -1043,11 +1289,26 @@ export class CombatScene extends Phaser.Scene {
           b.bg.setFillStyle(isSelected ? 0x5555aa : over ? 0x3a3a6a : 0x2a2a4a)
         }
       }
+
+      if (this.phase === 'chess' && this.abandonBtnBg?.visible) {
+        const overAbandon =
+          Math.abs(gx - 55) <= 48 &&
+          Math.abs(gy - (this.scale.height - 28)) <= 17
+        this.abandonBtnBg.setFillStyle(overAbandon ? 0x992222 : 0x661111)
+      }
     }
 
     const handleUp = (gx: number, gy: number) => {
+      if (this.chessDragGhost) {
+        this.endChessDrag(gx, gy) // drop after real chess drag
+        return
+      }
+      if (this.pendingChessDrag) {
+        this.pendingChessDrag = null // tap on piece: already selected via handleChessClick
+        return
+      }
       if (this.dragGhost) {
-        endDrag(gx, gy)        // drop after real drag
+        endDrag(gx, gy)        // drop after real placement drag
       } else if (this.pendingDrag) {
         this.pendingDrag = null // tap on card: card already selected, no placement
       }
@@ -1228,14 +1489,20 @@ export class CombatScene extends Phaser.Scene {
   }
 
   private createBoardLabels() {
-    const labelStyle = { fontFamily: FONT, fontSize: '14px', color: '#ffffff', fontStyle: 'bold' }
+    const fileStyle = { fontFamily: FONT, fontSize: '14px', color: '#ffffff', fontStyle: 'bold' }
+    const rankStyle = {
+      fontFamily: FONT, fontSize: '11px', color: '#ffffff', fontStyle: 'bold',
+      stroke: '#000000', strokeThickness: 2,
+    }
     // Local coords — added to boardContainer so they scale with the board
     for (let c = 0; c < COLS; c++) {
-      const label = this.add.text(c * CELL + CELL / 2, ROWS * CELL + 12, String.fromCharCode(97 + c), labelStyle).setOrigin(0.5, 0)
+      const label = this.add.text(c * CELL + CELL / 2, ROWS * CELL + 12, String.fromCharCode(97 + c), fileStyle).setOrigin(0.5, 0)
       this.boardContainer.add(label)
     }
+    // Rank labels live inside the leftmost cells so they remain visible when the
+    // board tweens to its chess-phase position (which leaves no room outside the frame).
     for (let r = 0; r < ROWS; r++) {
-      const label = this.add.text(-18, r * CELL + CELL / 2, String(8 - r), labelStyle).setOrigin(0.5, 0.5)
+      const label = this.add.text(3, r * CELL + 2, String(8 - r), rankStyle).setOrigin(0, 0)
       this.boardContainer.add(label)
     }
   }

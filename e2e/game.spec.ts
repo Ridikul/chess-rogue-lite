@@ -72,11 +72,12 @@ async function startScene(page: Page, key: string, data: unknown) {
 const INTRO_CLICK_X = 320
 const INTRO_CLICK_Y = 450
 
-// Map first combat node n1a: depth 1, i=0 of 2 nodes
-// y = h - 80 - (1/5)*(h-160) = 900-80-148 = 672
-// x = (640 / (2+1)) * 1 = 213
+// Map first combat node n1a: depth 1, index 0 of 2 nodes in that depth.
+// New layout: 10 depths total (maxDepth=9), BOTTOM_MARGIN=60, SPACING_Y=130.
+// Initial pan clamps start (depth 0) to worldY 840, so n1a (depth 1) sits at
+// worldY = 840 - 130 = 710. World x = 640/(2+1) = 213.
 const MAP_N1A_X = 213
-const MAP_N1A_Y = 672
+const MAP_N1A_Y = 710
 
 // Tutorial floor 1 hand: [king, pawn, pawn, pawn] — 4 cards, total width = 4*(82+8)-8 = 352
 // startX = (640-352)/2 = 144. Card centres (x+41, y+56) where y = HAND_Y_BASE = 618.

@@ -5,31 +5,73 @@ function makeNode(id: string, type: NodeType, depth: number, connections: string
   return { id, type, depth, cleared: false, connections }
 }
 
+// Map layout: 10 depths (0=start virtual, 9=boss).
+// Node IDs at depths 1..8 follow `n{depth}{letter}` (n1a, n2b, …).
+const MAP_LAYOUT: NodeType[][] = [
+  ['combat'],                          // 0 — start (not rendered)
+  ['combat', 'combat'],                // 1
+  ['combat', 'shop', 'combat'],        // 2
+  ['combat', 'event', 'combat'],       // 3
+  ['elite', 'combat'],                 // 4
+  ['combat', 'rest', 'event'],         // 5
+  ['combat', 'shop', 'combat'],        // 6
+  ['elite', 'combat'],                 // 7
+  ['rest'],                            // 8
+  ['boss'],                            // 9
+]
+
+const NODE_ID_LETTERS = 'abcdefg'
+
+function nodeIdAt(depth: number, indexInDepth: number, lastDepth: number): string {
+  if (depth === 0) return 'start'
+  if (depth === lastDepth) return 'boss'
+  return `n${depth}${NODE_ID_LETTERS[indexInDepth]}`
+}
+
 export function generateMap(): MapNode[] {
-  // 3 chemins possibles sur 5 étages + boss final
   const nodes: MapNode[] = []
+  const lastDepth = MAP_LAYOUT.length - 1
 
-  // Depth 0 : départ
-  nodes.push(makeNode('start', 'combat', 0, ['n1a', 'n1b']))
+  for (let d = 0; d < MAP_LAYOUT.length; d++) {
+    const types = MAP_LAYOUT[d]
+    for (let i = 0; i < types.length; i++) {
+      nodes.push(makeNode(nodeIdAt(d, i, lastDepth), types[i], d, []))
+    }
+  }
 
-  // Depth 1
-  nodes.push(makeNode('n1a', 'combat', 1, ['n2a', 'n2b']))
-  nodes.push(makeNode('n1b', 'combat', 1, ['n2b', 'n2c']))
+  // Connect each depth to the next so every node is reachable from start
+  // and every node reaches the boss.
+  for (let d = 0; d < lastDepth; d++) {
+    const cur = nodes.filter(n => n.depth === d)
+    const next = nodes.filter(n => n.depth === d + 1)
 
-  // Depth 2
-  nodes.push(makeNode('n2a', 'shop', 2, ['n3a']))
-  nodes.push(makeNode('n2b', 'elite', 2, ['n3a', 'n3b']))
-  nodes.push(makeNode('n2c', 'combat', 2, ['n3b']))
+    if (next.length === 1) {
+      cur.forEach(n => n.connections.push(next[0].id))
+      continue
+    }
 
-  // Depth 3
-  nodes.push(makeNode('n3a', 'combat', 3, ['n4']))
-  nodes.push(makeNode('n3b', 'rest', 3, ['n4']))
+    cur.forEach((n, i) => {
+      const frac = cur.length === 1 ? 0.5 : i / (cur.length - 1)
+      const baseIdx = Math.min(next.length - 1, Math.round(frac * (next.length - 1)))
+      n.connections.push(next[baseIdx].id)
+      // Branching: ~55% chance to also connect to an adjacent next-depth node
+      const offsetCandidates = [-1, 1].filter(o => baseIdx + o >= 0 && baseIdx + o < next.length)
+      if (offsetCandidates.length > 0 && Math.random() < 0.55) {
+        const offset = offsetCandidates[Math.floor(Math.random() * offsetCandidates.length)]
+        n.connections.push(next[baseIdx + offset].id)
+      }
+    })
 
-  // Depth 4
-  nodes.push(makeNode('n4', 'event', 4, ['boss']))
-
-  // Boss
-  nodes.push(makeNode('boss', 'boss', 5, []))
+    // Ensure every next-depth node has at least one inbound connection
+    const inbound = new Set<string>()
+    cur.forEach(n => n.connections.forEach(c => inbound.add(c)))
+    next.forEach((nn, idx) => {
+      if (inbound.has(nn.id)) return
+      const frac = next.length === 1 ? 0.5 : idx / (next.length - 1)
+      const fromIdx = cur.length === 1 ? 0 : Math.round(frac * (cur.length - 1))
+      if (!cur[fromIdx].connections.includes(nn.id)) cur[fromIdx].connections.push(nn.id)
+    })
+  }
 
   return nodes
 }

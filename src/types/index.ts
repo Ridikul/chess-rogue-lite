@@ -63,6 +63,7 @@ export interface BoardPiece {
   ability?: Ability
   upgradeBonus?: UpgradeBonus
   upgraded?: boolean
+  rarity?: CardDefinition['rarity']
 }
 
 export type BoardState = Map<Square, BoardPiece>

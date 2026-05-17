@@ -139,6 +139,14 @@ export class ChessEngine {
 
     this.extraTurn = bonusTurn
 
+    // Bonus turn: chess.js already flipped the side-to-move after the capture,
+    // so undo that flip so the same color can play again.
+    if (bonusTurn) {
+      const parts = this.chess.fen().split(' ')
+      parts[1] = movingPiece.color === 'white' ? 'w' : 'b'
+      this.chess.load(parts.join(' '))
+    }
+
     return {
       move: moveResult,
       captured: capturedBefore ? { square: to, piece: capturedBefore } : undefined,
