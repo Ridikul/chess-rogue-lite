@@ -1,11 +1,10 @@
 import Phaser from 'phaser'
 import { FONT, rarityLabel } from '../utils/style'
+import { RARITY_COLOR, PIECE_EMOJI, drawCardBorder } from '../utils/cardBorder'
 import { ChessEngine } from '../systems/ChessEngine'
 import { drawCards, shuffle, buildEnemyDeck } from '../systems/CardSystem'
 import { rewardCombat, hasRelic } from '../systems/RunState'
 import type { RunState, CardInstance, BoardPiece, PieceType, Square } from '../types/index'
-import { CARD_DEFINITIONS } from '../types/cards'
-import { shuffle as shuffleArr } from '../systems/CardSystem'
 
 const CELL = 64
 const BOARD_X = 64        // (640 - 512) / 2
@@ -23,14 +22,6 @@ const CHESS_SCALE = 76 / 64 // 1.1875
 
 const PIECE_EMOJI_WHITE: Record<PieceType, string> = {
   pawn: '♙', rook: '♖', knight: '♘', bishop: '♗', queen: '♕', king: '♔',
-}
-const PIECE_EMOJI_BLACK: Record<PieceType, string> = {
-  pawn: '♟', rook: '♜', knight: '♞', bishop: '♝', queen: '♛', king: '♚',
-}
-const PIECE_EMOJI: Record<PieceType, string> = PIECE_EMOJI_BLACK
-
-const RARITY_COLOR: Record<string, number> = {
-  common: 0x888888, uncommon: 0x4caf50, rare: 0x2196f3, legendary: 0xffc107,
 }
 
 type Phase = 'draw' | 'deal' | 'placement' | 'chess' | 'result'
@@ -81,6 +72,9 @@ export class CombatScene extends Phaser.Scene {
   private hpText!: Phaser.GameObjects.Text
   private confirmBtnBg!: Phaser.GameObjects.Rectangle
   private confirmBtnLabel!: Phaser.GameObjects.Text
+  private confirmShimmerTween: Phaser.Tweens.Tween | null = null
+  private abandonBtnBg!: Phaser.GameObjects.Rectangle
+  private abandonBtnLabel!: Phaser.GameObjects.Text
   private goldText!: Phaser.GameObjects.Text
 
   constructor() {
@@ -151,6 +145,7 @@ export class CombatScene extends Phaser.Scene {
 
     this.createBoardLabels()
     this.buildConfirmButton()
+    this.buildAbandonButton()
     this.setupNativeInput(this.inputAbortController.signal)
     this.startDrawPhase()
   }
@@ -162,12 +157,11 @@ export class CombatScene extends Phaser.Scene {
 
     // Draw from the persistent deck (king + pawns + acquired cards) in order, no shuffle.
     // Each combat starts from the full deck (fresh draw, no carry-over of draw position).
-    const extraCard = hasRelic(this.runState, 'extra_card') ? 1 : 0
+    const extraSlot = hasRelic(this.runState, 'extra_card') ? 1 : 0
     const gamblerBonus = hasRelic(this.runState, 'gamblers_dice') && Math.random() < 0.5 ? 1 : 0
-    const drawCount = 5 + extraCard + gamblerBonus
-    const { drawn } = drawCards(this.runState.deck, [], drawCount)
+    const { drawn } = drawCards(this.runState.deck, [], this.runState.deck.length)
     this.playerHand = drawn
-    this.placementBudget = drawn.length
+    this.placementBudget = drawn.length + extraSlot + gamblerBonus
 
     if (this.runState.floor === 1) {
       this.enemyPlaced = [{ type: 'king', color: 'black', square: 'e8', cardInstanceId: null }]
@@ -477,6 +471,7 @@ export class CombatScene extends Phaser.Scene {
         this.playerHand.push(card)
         this.selectedCard = card
         this.statusText.setText(`${card.definition.name} sélectionné — clique sur les rangées 1-4.`)
+        this.stopConfirmShimmer()
         this.renderBoard()
         this.renderPieces()
         this.renderHand()
@@ -508,6 +503,7 @@ export class CombatScene extends Phaser.Scene {
     this.renderPieces()
     this.renderHand()
     this.animatePieceLanding(sq)
+    if (this.playerHand.length === 0) this.startConfirmShimmer()
   }
 
   private confirmPlacement() {
@@ -515,6 +511,7 @@ export class CombatScene extends Phaser.Scene {
       this.statusText.setText('⚠ Tu dois placer ton Roi avant de confirmer !')
       return
     }
+    this.stopConfirmShimmer()
     this.engine.setupFromPlacement([...this.enemyPlaced, ...this.playerPlaced])
     this.phase = 'chess'
     ;(window as unknown as Record<string, unknown>).__gamePhase = 'chess'
@@ -524,6 +521,8 @@ export class CombatScene extends Phaser.Scene {
     this.clearCardObjects()
     this.clearCardPreview()
     this.setConfirmVisible(false)
+    this.abandonBtnBg.setVisible(true)
+    this.abandonBtnLabel.setVisible(true)
     this.showPhaseAnnounce('♟  Combat !')
     this.statusText.setFontSize('16px')
     this.statusText.setText('À toi de jouer.')
@@ -556,25 +555,37 @@ export class CombatScene extends Phaser.Scene {
         this.doPlayerMove(this.selectedSquare, sq)
         this.selectedSquare = null
         this.legalTargets = []
+        this.clearCardPreview()
         return
       }
       const p = pieces.get(sq)
       if (p && p.color === 'white') {
         this.selectedSquare = sq
         this.legalTargets = this.engine.getLegalMoves(sq)
+        this.showChessPiecePreview(sq)
       } else {
         this.selectedSquare = null
         this.legalTargets = []
+        this.clearCardPreview()
       }
     } else {
       const p = pieces.get(sq)
       if (p && p.color === 'white') {
         this.selectedSquare = sq
         this.legalTargets = this.engine.getLegalMoves(sq)
+        this.showChessPiecePreview(sq)
       }
     }
     this.renderBoard()
     this.renderPieces()
+  }
+
+  private showChessPiecePreview(sq: Square) {
+    const piece = this.engine.getBoardPieces().get(sq)
+    if (!piece?.cardInstanceId) return
+    const card = this.placedCardMap.get(piece.cardInstanceId)
+    if (!card) return
+    this.showCardPreview(card, this.scale.height - 100)
   }
 
   private doPlayerMove(from: Square, to: Square) {
@@ -648,123 +659,17 @@ export class CombatScene extends Phaser.Scene {
 
   private endCombat(playerWon: boolean) {
     this.phase = 'result'
-    ;(window as unknown as Record<string, unknown>).__gamePhase = playerWon ? 'result_win' : 'result_lose'
+    this.abandonBtnBg.setVisible(false)
+    this.abandonBtnLabel.setVisible(false)
+    this.clearCardPreview()
 
     if (!playerWon) {
-      this.add.text(this.scale.width / 2, this.scale.height / 2, 'Défaite…', {
-        fontFamily: FONT, fontSize: '52px', color: '#ff4444', fontStyle: 'bold',
-      }).setOrigin(0.5)
-      this.time.delayedCall(2200, () => this.scene.start('MenuScene'))
+      this.scene.start('DefeatScene')
       return
     }
 
     this.runState = rewardCombat(this.runState)
-    this.showRewardScreen()
-  }
-
-  private showRewardScreen() {
-    ;(window as unknown as Record<string, unknown>).__gamePhase = 'reward'
-    const { width, height } = this.scale
-
-    this.add.rectangle(0, 0, width, height, 0x060614, 0.92).setOrigin(0)
-
-    this.add.text(width / 2, 48, 'Victoire !', {
-      fontFamily: FONT, fontSize: '46px', color: '#44ff88', fontStyle: 'bold',
-    }).setOrigin(0.5)
-    this.add.text(width / 2, 106, `+${10 + this.runState.floor * 5} Or  ·  Total : ${this.runState.gold} Or`, {
-      fontFamily: FONT, fontSize: '16px', color: '#ffd700',
-    }).setOrigin(0.5)
-    this.add.text(width / 2, 140, 'Choisis une carte à ajouter à ton deck', {
-      fontFamily: FONT, fontSize: '13px', color: '#8888aa', fontStyle: 'italic',
-    }).setOrigin(0.5)
-
-    const cardW = 176
-    const cardH = 290
-    const gap = 10
-    const totalW = 3 * cardW + 2 * gap
-    const startX = (width - totalW) / 2
-    const cardY = 168
-
-    const allIds = Object.keys(CARD_DEFINITIONS).filter(id => id !== 'basic_king')
-    const choices = shuffleArr(allIds).slice(0, 3)
-    choices.forEach((id, i) => {
-      this.buildRewardCard(startX + i * (cardW + gap), cardY, cardW, cardH, id)
-    })
-
-    const skip = this.add.rectangle(width / 2, height - 44, 180, 40, 0x2a2a2a).setInteractive()
-    this.add.text(width / 2, height - 44, 'Passer', {
-      fontFamily: FONT, fontSize: '14px', color: '#666677',
-    }).setOrigin(0.5)
-    skip.on('pointerover', () => skip.setFillStyle(0x444455))
-    skip.on('pointerout', () => skip.setFillStyle(0x2a2a2a))
-    skip.on('pointerdown', () => this.scene.start('MapScene', { runState: this.runState }))
-  }
-
-  private buildRewardCard(x: number, y: number, w: number, h: number, cardId: string) {
-    const def = CARD_DEFINITIONS[cardId]!
-    const rarityColor = RARITY_COLOR[def.rarity]
-    const rarityHex = `#${rarityColor.toString(16).padStart(6, '0')}`
-    const container = this.add.container(x, y)
-
-    const bg = this.add.rectangle(0, 0, w, h, 0x12122e).setOrigin(0)
-    const frame = this.add.graphics()
-    drawCardBorder(frame, 0, 0, w, h, rarityColor)
-
-    const emoji = this.add.text(w / 2, 54, PIECE_EMOJI[def.pieceType], {
-      fontFamily: FONT, fontSize: '52px',
-    }).setOrigin(0.5)
-
-    const name = this.add.text(w / 2, 120, def.name, {
-      fontFamily: FONT, fontSize: '16px', color: '#ffffff', fontStyle: 'bold',
-      align: 'center', wordWrap: { width: w - 20 },
-    }).setOrigin(0.5, 0)
-
-    const rarity = this.add.text(w / 2, 148, rarityLabel(def.rarity), {
-      fontFamily: FONT, fontSize: '11px', color: rarityHex, fontStyle: 'bold',
-    }).setOrigin(0.5, 0)
-
-    const sep = this.add.graphics()
-    sep.lineStyle(1, rarityColor, 0.3)
-    sep.beginPath(); sep.moveTo(16, 168); sep.lineTo(w - 16, 168); sep.strokePath()
-
-    const bodyText = def.ability?.description ?? def.flavorText ?? ''
-    const body = this.add.text(w / 2, 178, bodyText, {
-      fontFamily: FONT, fontSize: '12px',
-      color: def.ability ? '#aaccff' : '#777788',
-      fontStyle: def.ability ? 'normal' : 'italic',
-      align: 'center', wordWrap: { width: w - 24 },
-    }).setOrigin(0.5, 0)
-
-    container.add([bg, frame, emoji, name, rarity, sep, body])
-    container.setSize(w, h).setInteractive()
-
-    container.on('pointerover', () => {
-      bg.setFillStyle(0x22224a)
-      this.tweens.killTweensOf(container)
-      this.tweens.add({
-        targets: container,
-        scaleX: 1.06, scaleY: 1.06,
-        y: y - 10,
-        duration: 160, ease: 'Back.Out',
-      })
-    })
-    container.on('pointerout', () => {
-      bg.setFillStyle(0x12122e)
-      this.tweens.killTweensOf(container)
-      this.tweens.add({
-        targets: container,
-        scaleX: 1, scaleY: 1,
-        y,
-        duration: 180, ease: 'Quad.Out',
-      })
-    })
-    container.on('pointerdown', () => {
-      this.runState = {
-        ...this.runState,
-        deck: [...this.runState.deck, { instanceId: `card_r_${Date.now()}`, definition: def, upgraded: false }],
-      }
-      this.scene.start('MapScene', { runState: this.runState })
-    })
+    this.scene.start('VictoryScene', { runState: this.runState })
   }
 
   // ─── RENDER ──────────────────────────────────────────────────────────────────
@@ -845,7 +750,7 @@ export class CombatScene extends Phaser.Scene {
       const cx = col * CELL + CELL / 2
       const cy = row * CELL + CELL / 2
 
-      const emoji = piece.color === 'white' ? PIECE_EMOJI_WHITE[piece.type] : PIECE_EMOJI_BLACK[piece.type]
+      const emoji = piece.color === 'white' ? PIECE_EMOJI_WHITE[piece.type] : PIECE_EMOJI[piece.type]
       const t = this.add.text(cx, cy, emoji, {
         fontFamily: FONT, fontSize: '50px',
         color: piece.color === 'white' ? '#f5f0e0' : '#1a0a04',
@@ -980,8 +885,32 @@ export class CombatScene extends Phaser.Scene {
     this.confirmBtnBg.on('pointerdown', () => {
       if (this.phase === 'placement') this.confirmPlacement()
     })
-    this.confirmBtnBg.on('pointerover', () => this.confirmBtnBg.setFillStyle(0x4488bb))
-    this.confirmBtnBg.on('pointerout', () => this.confirmBtnBg.setFillStyle(0x336699))
+    this.confirmBtnBg.on('pointerover', () => {
+      this.confirmBtnBg.setFillStyle(0x4488bb)
+      if (this.confirmShimmerTween) {
+        this.confirmShimmerTween.pause()
+        this.confirmBtnBg.setAlpha(1)
+        this.confirmBtnLabel.setAlpha(1)
+      }
+    })
+    this.confirmBtnBg.on('pointerout', () => {
+      this.confirmBtnBg.setFillStyle(0x336699)
+      this.confirmShimmerTween?.resume()
+    })
+  }
+
+  private buildAbandonButton() {
+    const cx = 55
+    const cy = this.scale.height - 28
+    this.abandonBtnBg = this.add.rectangle(cx, cy, 96, 34, 0x661111)
+      .setInteractive(new Phaser.Geom.Rectangle(-48, -17, 96, 34), Phaser.Geom.Rectangle.Contains)
+    this.abandonBtnLabel = this.add.text(cx, cy, 'Abandonner', { fontFamily: FONT, fontSize: '12px', color: '#ffaaaa', fontStyle: 'bold' }).setOrigin(0.5)
+    this.abandonBtnBg.setVisible(false)
+    this.abandonBtnLabel.setVisible(false)
+
+    this.abandonBtnBg.on('pointerdown', () => this.endCombat(false))
+    this.abandonBtnBg.on('pointerover', () => this.abandonBtnBg.setFillStyle(0x992222))
+    this.abandonBtnBg.on('pointerout', () => this.abandonBtnBg.setFillStyle(0x661111))
   }
 
   // Transform a screen click into board col/row, accounting for container transform.
@@ -1175,12 +1104,12 @@ export class CombatScene extends Phaser.Scene {
     if (this.selectedCard) this.showCardPreview(this.selectedCard)
   }
 
-  private showCardPreview(card: CardInstance) {
+  private showCardPreview(card: CardInstance, yOverride?: number) {
     this.clearCardPreview()
     const { width } = this.scale
     const def = card.definition
 
-    const stripY = HAND_Y_BASE + CARD_H + 34
+    const stripY = yOverride ?? HAND_Y_BASE + CARD_H + 34
     const stripW = width - 60
     const stripH = 56
 
@@ -1202,7 +1131,7 @@ export class CombatScene extends Phaser.Scene {
     const body = this.add.text(-hw + 46, 9, bodyText, {
       fontFamily: FONT, fontSize: '11px',
       color: COLOR_DESCRIPTION_CARD,
-      fontStyle: def.ability ? 'normal' : 'italic',
+      fontStyle: def.ability ? 'bold' : 'bold italic',
       wordWrap: { width: stripW - 100 },
     }).setOrigin(0, 0.5)
 
@@ -1278,6 +1207,26 @@ export class CombatScene extends Phaser.Scene {
     if (label) this.confirmBtnLabel.setText(label)
   }
 
+  private startConfirmShimmer() {
+    if (this.confirmShimmerTween) return
+    this.confirmShimmerTween = this.tweens.add({
+      targets: [this.confirmBtnBg, this.confirmBtnLabel],
+      alpha: { from: 1, to: 0.4 },
+      duration: 450,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.easeInOut',
+    })
+  }
+
+  private stopConfirmShimmer() {
+    if (!this.confirmShimmerTween) return
+    this.confirmShimmerTween.stop()
+    this.confirmShimmerTween = null
+    this.confirmBtnBg.setAlpha(1)
+    this.confirmBtnLabel.setAlpha(1)
+  }
+
   private createBoardLabels() {
     const labelStyle = { fontFamily: FONT, fontSize: '14px', color: '#ffffff', fontStyle: 'bold' }
     // Local coords — added to boardContainer so they scale with the board
@@ -1329,34 +1278,6 @@ export class CombatScene extends Phaser.Scene {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function drawCardBorder(
-  g: Phaser.GameObjects.Graphics,
-  x: number, y: number, w: number, h: number,
-  color: number,
-) {
-  const arm = 14
-  g.fillStyle(color, 0.07)
-  g.fillRect(x + 2, y + 2, w - 4, h - 4)
-  g.lineStyle(2, color, 0.9)
-  g.strokeRect(x, y, w, h)
-  g.lineStyle(1, color, 0.5)
-  g.strokeRect(x + 5, y + 5, w - 10, h - 10)
-  g.lineStyle(3, color, 1)
-  const brackets: [number, number, number, number][] = [
-    [x,     y,     1,  1],
-    [x + w, y,    -1,  1],
-    [x,     y + h, 1, -1],
-    [x + w, y + h, -1, -1],
-  ]
-  for (const [bx, by, dx, dy] of brackets) {
-    g.beginPath()
-    g.moveTo(bx + dx * arm, by)
-    g.lineTo(bx, by)
-    g.lineTo(bx, by + dy * arm)
-    g.strokePath()
-  }
-}
 
 function colRowToSquare(col: number, row: number): Square {
   return `${String.fromCharCode(97 + col)}${8 - row}`

@@ -189,22 +189,83 @@ test.describe('Chess Rogue Lite – UI flow', () => {
 
   // ── Reward screen ────────────────────────────────────────────────────────────
 
-  test('reward: buying a card advances to map', async ({ page }) => {
+  test('shop: buying a card adds it to the deck and deducts gold', async ({ page }) => {
     await page.goto('/')
     await waitForPhase(page, 'menu')
-    // Start a CombatScene that has already won: inject via scene start then trigger
-    // reward screen by wiring directly into ShopScene for card-reward equivalent.
-    // Reward screen is triggered inside CombatScene after combat win — test via
-    // injecting enough gold in a shop purchase to verify card-add flow works.
-    // Full reward screen e2e requires winning chess; covered by unit tests instead.
-    // This test verifies the 'reward' phase marker is set before MapScene opens.
     await startScene(page, 'ShopScene', { runState: makeShopRunState(200) })
     await waitForPhase(page, 'shop')
-    // Buy first card (affordable at 200 gold — common cards cost 40)
-    const cardX = Math.round((640 - (3 * 176 + 2 * 10)) / 2) + 88
-    await clickCanvas(page, cardX, 168 + 126)
-    // After purchase the scene restarts (toast + 900ms delay)
+
+    const deckBefore = await page.evaluate(() => {
+      const g = (window as unknown as Record<string, unknown>).__game as {
+        scene: { getScene: (k: string) => Record<string, unknown> }
+      }
+      const scene = g.scene.getScene('ShopScene') as unknown as { runState: { deck: unknown[]; gold: number } }
+      return { deckLen: scene.runState.deck.length, gold: scene.runState.gold }
+    })
+
+    // Click lower portion of card 1 (y=88+220=308) — was outside the old centered hitbox
+    const cardX = Math.round((640 - (3 * 176 + 2 * 10)) / 2) + 88  // 134
+    await clickCanvas(page, cardX, 88 + 220)
+
+    // Shop restarts after 900 ms toast
     await waitForPhase(page, 'shop', 4000)
+
+    const deckAfter = await page.evaluate(() => {
+      const g = (window as unknown as Record<string, unknown>).__game as {
+        scene: { getScene: (k: string) => Record<string, unknown> }
+      }
+      const scene = g.scene.getScene('ShopScene') as unknown as { runState: { deck: unknown[]; gold: number } }
+      return { deckLen: scene.runState.deck.length, gold: scene.runState.gold }
+    })
+
+    expect(deckAfter.deckLen).toBe(deckBefore.deckLen + 1)
+    expect(deckAfter.gold).toBeLessThan(deckBefore.gold)
+  })
+
+  // ── Combat reward (victory) ──────────────────────────────────────────────────
+
+  // Helper: reach chess phase from a fresh game
+  async function reachChessPhase(page: Page) {
+    await page.goto('/')
+    await waitForPhase(page, 'menu')
+    await clickCanvas(page, 320, 585)
+    await skipIntroAndSelectNode(page)
+    await skipDeal(page)
+    await waitForPhase(page, 'placement')
+    await placeKing(page)
+    await clickCanvas(page, 320, 872)
+    await waitForPhase(page, 'chess')
+  }
+
+  // Trigger endCombat(true) directly on the active CombatScene (JS private is accessible at runtime)
+  async function triggerCombatWin(page: Page) {
+    await page.evaluate(() => {
+      const g = (window as unknown as Record<string, unknown>).__game as {
+        scene: { getScene: (k: string) => Record<string, unknown> }
+      }
+      const scene = g.scene.getScene('CombatScene')
+      ;(scene as unknown as { endCombat: (v: boolean) => void }).endCombat(true)
+    })
+  }
+
+  test('victory: result_win phase shows before reward phase (animation plays)', async ({ page }) => {
+    await reachChessPhase(page)
+    await triggerCombatWin(page)
+    // Immediately after endCombat(true), phase must be result_win (animation running)
+    await waitForPhase(page, 'result_win')
+    // After the victory animation (~1.7 s) phase must advance to reward
+    await waitForPhase(page, 'reward', 5000)
+  })
+
+  test('reward: clicking bottom of card (previously outside hitbox) advances to map', async ({ page }) => {
+    await reachChessPhase(page)
+    await triggerCombatWin(page)
+    await waitForPhase(page, 'reward', 5000)
+
+    // startX=(640-548)/2=46, card1 centre-x=46+88=134, bottom area y=168+260=428
+    // This y was outside the old centered hit area (which only reached y=168+145=313)
+    await clickCanvas(page, 134, 428)
+    await waitForPhase(page, 'map', 3000)
   })
 
   test('chess phase: clicking a piece selects it', async ({ page }) => {

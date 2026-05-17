@@ -153,11 +153,11 @@ describe('rewardCombat', () => {
     expect(newRun.gold).toBeGreaterThan(0)
   })
 
-  it('gives exactly 30 + floor * 5 gold (on top of existing gold)', () => {
-    // createRunState starts with gold=10; rewardCombat adds 30 + floor*5
-    expect(rewardCombat({ ...createRunState(), floor: 1 }).gold).toBe(10 + 35)
-    expect(rewardCombat({ ...createRunState(), floor: 3 }).gold).toBe(10 + 45)
-    expect(rewardCombat({ ...createRunState(), floor: 5 }).gold).toBe(10 + 55)
+  it('gives exactly 45 + floor * 7 gold (on top of existing gold)', () => {
+    // createRunState starts with gold=10; rewardCombat adds 45 + floor*7
+    expect(rewardCombat({ ...createRunState(), floor: 1 }).gold).toBe(10 + 52)
+    expect(rewardCombat({ ...createRunState(), floor: 3 }).gold).toBe(10 + 66)
+    expect(rewardCombat({ ...createRunState(), floor: 5 }).gold).toBe(10 + 80)
   })
 
   it('adds bonus gold with gold_coin relic', () => {

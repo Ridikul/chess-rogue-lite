@@ -78,10 +78,13 @@ export function healHp(run: RunState, amount: number): RunState {
   return { ...run, currentHp: Math.min(run.maxHp, run.currentHp + amount) }
 }
 
-export function rewardCombat(run: RunState): RunState {
+export function combatGoldReward(run: RunState): number {
   const goldBonus = run.relics.some(r => r.id === 'gold_coin') ? 3 : 0
-  const baseGold = 30 + run.floor * 5
-  return { ...run, gold: run.gold + baseGold + goldBonus }
+  return 45 + run.floor * 7 + goldBonus
+}
+
+export function rewardCombat(run: RunState): RunState {
+  return { ...run, gold: run.gold + combatGoldReward(run) }
 }
 
 export function hasRelic(run: RunState, relicId: string): boolean {

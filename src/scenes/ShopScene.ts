@@ -152,7 +152,7 @@ export class ShopScene extends Phaser.Scene {
     }).setOrigin(0.5)
 
     container.add([bg, border, emoji, name, rarity, body, priceBg, priceLabel])
-    container.setSize(w, h).setInteractive()
+    container.setInteractive(new Phaser.Geom.Rectangle(0, 0, w, h), Phaser.Geom.Rectangle.Contains)
 
     if (canAfford) {
       container.on('pointerover', () => {
@@ -198,7 +198,7 @@ export class ShopScene extends Phaser.Scene {
     }).setOrigin(0.5)
 
     container.add([bg, border, name, desc, priceBg, priceLabel])
-    container.setSize(w, h).setInteractive()
+    container.setInteractive(new Phaser.Geom.Rectangle(0, 0, w, h), Phaser.Geom.Rectangle.Contains)
 
     if (canAfford) {
       container.on('pointerover', () => {

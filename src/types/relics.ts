@@ -17,8 +17,8 @@ export const RELIC_DEFINITIONS: Record<string, Relic> = {
   extra_card: {
     id: 'extra_card',
     name: 'Main Généreuse',
-    description: 'Pioche 1 carte supplémentaire en phase de placement.',
-    // lu dans CombatScene : drawCount
+    description: 'Obtiens 1 slot de placement supplémentaire.',
+    // lu dans CombatScene : placementBudget
   },
 
   // ── Uncommons ─────────────────────────────────────────────────────────────
